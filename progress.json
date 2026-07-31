@@ -1,5 +1,5 @@
 {
-  "last_successful_row": 0,
-  "emails_sent_today": 0,
-  "last_run_date": ""
+  "sent_emails": [],
+  "last_sent_date": "",
+  "sent_today": 0
 }

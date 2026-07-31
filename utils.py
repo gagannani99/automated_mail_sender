@@ -53,7 +53,7 @@ def random_delay(min_seconds: float, max_seconds: float) -> float:
         The actual number of seconds slept.
     """
     duration = random.uniform(min_seconds, max_seconds)
-    countdown(duration, "Next email in")
+    time.sleep(duration)
     return duration
 
 
@@ -70,23 +70,8 @@ def random_break_minutes(min_minutes: float, max_minutes: float) -> float:
         The actual number of minutes slept.
     """
     minutes = random.uniform(min_minutes, max_minutes)
-    countdown(minutes * 60, "Break remaining")
+    time.sleep(minutes * 60)
     return minutes
-
-
-def countdown(seconds: float, label: str) -> None:
-    """Display a one-second countdown while waiting for ``seconds``.
-
-    The final partial second is intentionally rounded up so the displayed
-    duration never understates the time the sender will wait.
-    """
-    remaining = max(0, int(seconds + 0.999))
-    while remaining:
-        minutes, secs = divmod(remaining, 60)
-        print(f"\r{label}: {minutes:02d}:{secs:02d}", end="", flush=True)
-        time.sleep(1)
-        remaining -= 1
-    print("\r" + " " * 40 + "\r", end="", flush=True)
 
 
 def ensure_directory(path: Path) -> None:

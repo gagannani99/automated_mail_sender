@@ -73,20 +73,15 @@ class _ColorFormatter(logging.Formatter):
 
     _COLORS = {
         logging.DEBUG: Fore.CYAN,
-        logging.INFO: Fore.BLUE,
+        logging.INFO: Fore.GREEN,
         logging.WARNING: Fore.YELLOW,
         logging.ERROR: Fore.RED,
         logging.CRITICAL: Fore.MAGENTA + Style.BRIGHT,
     }
 
     def format(self, record: logging.LogRecord) -> str:
+        color = self._COLORS.get(record.levelno, "")
         message = super().format(record)
-        if "SENT" in record.getMessage():
-            color = Fore.GREEN
-        elif "SKIPPED" in record.getMessage():
-            color = Fore.YELLOW
-        else:
-            color = self._COLORS.get(record.levelno, "")
         return f"{color}{message}{Style.RESET_ALL}"
 
     def __init__(self) -> None:

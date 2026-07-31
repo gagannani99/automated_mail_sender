@@ -22,12 +22,10 @@ from __future__ import annotations
 import json
 import os
 import sys
-import time
-import traceback
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Set
 
 from dotenv import load_dotenv
 
@@ -44,9 +42,9 @@ logger = get_logger()
 class Progress:
     """In-memory representation of progress.json."""
 
-    last_successful_row: int
-    emails_sent_today: int
-    last_run_date: str
+    sent_emails: Set[str]
+    last_sent_date: str
+    sent_today: int
 
     @classmethod
     def load(cls, path: Path) -> "Progress":
@@ -60,7 +58,7 @@ class Progress:
             A Progress instance reflecting the file's contents (or defaults).
         """
         if not path.exists():
-            progress = cls(last_successful_row=0, emails_sent_today=0, last_run_date="")
+            progress = cls(sent_emails=set(), last_sent_date="", sent_today=0)
             progress.save(path)
             return progress
 
@@ -68,13 +66,13 @@ class Progress:
             with open(path, "r", encoding="utf-8") as fh:
                 raw: Dict[str, Any] = json.load(fh)
             return cls(
-                last_successful_row=int(raw.get("last_successful_row", 0)),
-                emails_sent_today=int(raw.get("emails_sent_today", 0)),
-                last_run_date=str(raw.get("last_run_date", "")),
+                sent_emails=set(e.lower() for e in raw.get("sent_emails", [])),
+                last_sent_date=raw.get("last_sent_date", ""),
+                sent_today=int(raw.get("sent_today", 0)),
             )
         except (json.JSONDecodeError, OSError, ValueError) as exc:
             logger.warning("progress.json was unreadable (%s); starting fresh.", exc)
-            progress = cls(last_successful_row=0, emails_sent_today=0, last_run_date="")
+            progress = cls(sent_emails=set(), last_sent_date="", sent_today=0)
             progress.save(path)
             return progress
 
@@ -86,9 +84,9 @@ class Progress:
             path: Path to progress.json.
         """
         payload = {
-            "last_successful_row": self.last_successful_row,
-            "emails_sent_today": self.emails_sent_today,
-            "last_run_date": self.last_run_date,
+            "sent_emails": sorted(self.sent_emails),
+            "last_sent_date": self.last_sent_date,
+            "sent_today": self.sent_today,
         }
         tmp_path = path.with_suffix(".tmp")
         with open(tmp_path, "w", encoding="utf-8") as fh:
@@ -96,16 +94,16 @@ class Progress:
         tmp_path.replace(path)
 
     def reset_daily_counter_if_new_day(self) -> None:
-        """Reset the daily count automatically when the calendar day changes."""
+        """Reset sent_today to 0 if the stored date differs from today."""
         today_str = date.today().isoformat()
-        if self.last_run_date != today_str:
-            self.last_run_date = today_str
-            self.emails_sent_today = 0
+        if self.last_sent_date != today_str:
+            self.last_sent_date = today_str
+            self.sent_today = 0
 
-    def mark_sent(self, row_number: int) -> None:
-        """Record a successful send and the source row that completed it."""
-        self.last_successful_row = row_number
-        self.emails_sent_today += 1
+    def mark_sent(self, email: str) -> None:
+        """Record a successful send for the given email address."""
+        self.sent_emails.add(email.strip().lower())
+        self.sent_today += 1
 
 
 def verify_prerequisites() -> None:
@@ -187,9 +185,9 @@ def run() -> None:
     progress.reset_daily_counter_if_new_day()
     progress.save(config.PROGRESS_FILE)
 
-    # The CSV is the authoritative duplicate-protection record. It is read
-    # again immediately before each send to protect against a concurrent run.
-    already_sent = csv_logger.already_sent_emails()
+    # Secondary safety net: anything already marked SENT in the CSV log
+    # is also treated as already sent, even if progress.json was reset.
+    already_sent = progress.sent_emails | csv_logger.already_sent_emails()
 
     logger.info("Loading HR contacts from PDF...")
     try:
@@ -210,9 +208,12 @@ def run() -> None:
         logger.info("No pending contacts to send to. Nothing to do. Exiting.")
         return
 
-    remaining_today = max(config.DAILY_LIMIT - progress.emails_sent_today, 0)
+    remaining_today = max(config.DAILY_LIMIT - progress.sent_today, 0)
     if remaining_today <= 0:
-        logger.info("Daily Limit Reached")
+        logger.info(
+            "Daily limit of %d already reached today. Try again tomorrow.",
+            config.DAILY_LIMIT,
+        )
         return
 
     if not confirm_send(len(pending_df), remaining_today):
@@ -221,129 +222,66 @@ def run() -> None:
 
     email_address, app_password = load_credentials()
 
-    sent_count = failed_count = skipped_count = 0
-    run_started = time.monotonic()
-    sender: EmailSender | None = None
+    sent_count = 0
+    failed_count = 0
+    skipped_count = 0
+
     try:
-        sender = EmailSender(email_address, app_password, config.RESUME_PATH)
-        # The connection is opened lazily by send(), then retained for all
-        # later recipients unless Gmail drops it.
-        for position, (_, row) in enumerate(pending_df.iterrows(), start=1):
-            if progress.emails_sent_today >= config.DAILY_LIMIT:
+        with EmailSender(email_address, app_password, config.RESUME_PATH) as sender:
+            for position, (_, row) in enumerate(pending_df.iterrows(), start=1):
+                if progress.sent_today >= config.DAILY_LIMIT:
+                    logger.info("Reached daily limit of %d. Stopping for today.", config.DAILY_LIMIT)
+                    break
+
+                sno = row["SNo"]
+                hr_name = row["Name"] or "Hiring Manager"
+                company_name = row["Company"] or "your company"
+                email = row["Email"]
+
+                try:
+                    sender.send(hr_name=hr_name, company_name=company_name, recipient_email=email)
+                except EmailSenderError as exc:
+                    failed_count += 1
+                    logger.error("FAILED -> %s (%s): %s", email, company_name, exc)
+                    csv_logger.log(sno, hr_name, company_name, email, "FAILED", str(exc))
+                    continue
+
+                sent_count += 1
+                progress.mark_sent(email)
                 progress.save(config.PROGRESS_FILE)
-                logger.info("Daily Limit Reached")
-                break
+                csv_logger.log(sno, hr_name, company_name, email, "SENT")
+                logger.info(
+                    "SENT [%d/%d today] -> %s | %s (%s)",
+                    progress.sent_today,
+                    config.DAILY_LIMIT,
+                    email,
+                    hr_name,
+                    company_name,
+                )
 
-            sno = row["SNo"]
-            hr_name = row["Name"] or "Hiring Manager"
-            company_name = row["Company"] or "your company"
-            email = row["Email"]
-            _display_current_status(
-                row_number=sno,
-                total=total_contacts,
-                company=company_name,
-                hr_name=hr_name,
-                email=email,
-                sent_today=progress.emails_sent_today,
-                failed=failed_count,
-                skipped=skipped_count,
-                elapsed=time.monotonic() - run_started,
-                estimated_remaining=_estimate_remaining(
-                    time.monotonic() - run_started, position - 1, len(pending_df) - position + 1
-                ),
-            )
+                is_last = position == len(pending_df) or progress.sent_today >= config.DAILY_LIMIT
+                if is_last:
+                    break
 
-            if email.strip().lower() in csv_logger.already_sent_emails():
-                skipped_count += 1
-                csv_logger.log(sno, hr_name, company_name, email, "SKIPPED", "Already marked SENT in CSV")
-                logger.warning("SKIPPED -> %s already has status SENT.", email)
-                continue
+                if sent_count % config.BREAK_AFTER == 0:
+                    minutes = random_break_minutes(
+                        config.BREAK_MINUTES_MIN, config.BREAK_MINUTES_MAX
+                    )
+                    logger.info("Taking a break of %.1f minutes after %d emails...", minutes, sent_count)
+                else:
+                    delay = random_delay(config.MIN_DELAY, config.MAX_DELAY)
+                    logger.info("Waiting %.1f seconds before next email...", delay)
 
-            try:
-                sender.send(hr_name=hr_name, company_name=company_name, recipient_email=email)
-            except EmailSenderError as exc:
-                failed_count += 1
-                logger.error("FAILED -> %s (%s): %s", email, company_name, exc)
-                csv_logger.log(sno, hr_name, company_name, email, "FAILED", str(exc))
-                continue
-
-            sent_count += 1
-            progress.mark_sent(_row_number(sno, position))
-            csv_logger.log(sno, hr_name, company_name, email, "SENT")
-            progress.save(config.PROGRESS_FILE)
-            logger.info("SENT [%d/%d today] -> %s | %s (%s)", progress.emails_sent_today, config.DAILY_LIMIT, email, hr_name, company_name)
-
-            if progress.emails_sent_today >= config.DAILY_LIMIT:
-                logger.info("Daily Limit Reached")
-                break
-            if position == len(pending_df):
-                continue
-            if sent_count % config.BREAK_AFTER == 0:
-                logger.info("Taking a break after %d successful emails.", sent_count)
-                random_break_minutes(config.BREAK_MINUTES_MIN, config.BREAK_MINUTES_MAX)
-            else:
-                random_delay(config.MIN_DELAY, config.MAX_DELAY)
+    except EmailSenderError as exc:
+        logger.error("Could not establish SMTP connection: %s", exc)
+        sys.exit(1)
     except KeyboardInterrupt:
-        progress.save(config.PROGRESS_FILE)
-        if sender is not None:
-            sender.close()
         logger.warning("Interrupted by user. Progress has been saved up to the last successful send.")
-        print(f"Last Successful Row: {progress.last_successful_row}")
-        print(f"Next Start Row: {progress.last_successful_row + 1}")
-        print_summary(sent_count, failed_count, skipped_count, interrupted=True)
-        return
-    except Exception:  # noqa: BLE001 - final safety boundary for CLI execution
         progress.save(config.PROGRESS_FILE)
-        if sender is not None:
-            sender.close()
-        logger.error("Unexpected error. Progress was saved; SMTP disconnected.")
-        traceback.print_exc()
-        return
-    finally:
-        if sender is not None:
-            sender.close()
+        print_summary(sent_count, failed_count, skipped_count, interrupted=True)
+        sys.exit(130)
 
     print_summary(sent_count, failed_count, skipped_count, interrupted=False)
-
-
-def _row_number(value: object, fallback: int) -> int:
-    """Convert a source SNo value to an integer, using its position if needed."""
-    try:
-        return int(str(value).strip())
-    except (TypeError, ValueError):
-        return fallback
-
-
-def _format_duration(seconds: float) -> str:
-    """Return a compact HH:MM:SS representation of a duration."""
-    total_seconds = max(0, int(seconds))
-    hours, remainder = divmod(total_seconds, 3600)
-    minutes, secs = divmod(remainder, 60)
-    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
-
-
-def _estimate_remaining(elapsed: float, completed: int, remaining: int) -> float:
-    """Estimate remaining runtime using average time per processed contact."""
-    return 0.0 if completed <= 0 else elapsed / completed * remaining
-
-
-def _display_current_status(
-    row_number: object, total: int, company: str, hr_name: str, email: str,
-    sent_today: int, failed: int, skipped: int, elapsed: float,
-    estimated_remaining: float,
-) -> None:
-    """Print the required pre-send status panel for the current contact."""
-    print("\n" + "-" * 35)
-    print(f"Current Row: {_row_number(row_number, 0)} / {total}")
-    print(f"Company: {company}")
-    print(f"HR Name: {hr_name}")
-    print(f"Email: {email}")
-    print(f"Today's Sent: {sent_today}")
-    print(f"Failed: {failed}")
-    print(f"Skipped: {skipped}")
-    print(f"Elapsed Time: {_format_duration(elapsed)}")
-    print(f"Estimated Remaining Time: {_format_duration(estimated_remaining)}")
-    print("-" * 35)
 
 
 def print_summary(sent: int, failed: int, skipped: int, interrupted: bool) -> None:

@@ -50,19 +50,15 @@ https://github.com/gagannani99
 # Gmail personal accounts are capped at ~500 recipients/day by Google, and
 # sending too fast or in a single burst is the fastest way to get an
 # account flagged or suspended. DAILY_LIMIT is intentionally conservative.
-DAILY_LIMIT: int = 120
+DAILY_LIMIT: int = 80
 
 # 1-indexed row (by SNo) to start from the very first time the app is run
 # and progress.json has no prior history for the recipient list.
 START_ROW: int = 1
 
 # Random delay (in seconds) inserted between two consecutive emails.
-MIN_DELAY: float = 30.0
-MAX_DELAY: float = 90.0
-
-# Maximum total attempts for one SMTP operation.  A dropped connection is
-# re-established before each retry.
-SMTP_MAX_RETRIES: int = 3
+MIN_DELAY: float = 25.0
+MAX_DELAY: float = 55.0
 
 # Take a longer break after this many emails have been sent in the
 # current run, to further mimic human sending behaviour.

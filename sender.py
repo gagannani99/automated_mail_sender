@@ -56,7 +56,6 @@ class EmailSender:
         Raises:
             EmailSenderError: If connection or authentication fails.
         """
-        self.close()
         try:
             context = ssl.create_default_context()
             self._connection = smtplib.SMTP_SSL(
@@ -78,7 +77,7 @@ class EmailSender:
         if self._connection is not None:
             try:
                 self._connection.quit()
-            except (smtplib.SMTPException, OSError):
+            except smtplib.SMTPException:
                 pass
             finally:
                 self._connection = None
@@ -143,29 +142,18 @@ class EmailSender:
         Raises:
             EmailSenderError: If not connected, or if sending fails.
         """
+        if self._connection is None:
+            raise EmailSenderError("SMTP connection is not open. Call connect() first.")
+
         message = self._build_message(hr_name, company_name, recipient_email)
-        last_error: Optional[Exception] = None
 
-        for attempt in range(1, config.SMTP_MAX_RETRIES + 1):
-            try:
-                if self._connection is None:
-                    self.connect()
-                if self._connection is None:  # Defensive guard for type checkers.
-                    raise EmailSenderError("SMTP connection could not be opened.")
-                self._connection.send_message(message)
-                return
-            except (smtplib.SMTPException, OSError, EmailSenderError) as exc:
-                last_error = exc
-                self.close()
-                if attempt < config.SMTP_MAX_RETRIES:
-                    logger.warning(
-                        "SMTP attempt %d/%d failed for %s; reconnecting...",
-                        attempt,
-                        config.SMTP_MAX_RETRIES,
-                        recipient_email,
-                    )
-
-        raise EmailSenderError(
-            f"Failed to send email to {recipient_email} after "
-            f"{config.SMTP_MAX_RETRIES} attempts: {last_error}"
-        ) from last_error
+        try:
+            self._connection.send_message(message)
+        except smtplib.SMTPServerDisconnected:
+            # Attempt a single reconnect-and-retry, since long-running
+            # sessions can be dropped by the server.
+            logger.warning("SMTP connection dropped; attempting to reconnect...")
+            self.connect()
+            self._connection.send_message(message)
+        except smtplib.SMTPException as exc:
+            raise EmailSenderError(f"Failed to send email to {recipient_email}: {exc}") from exc
