@@ -99,3 +99,68 @@ RESUME_PATH: Path = BASE_DIR / "attachments" / "Resume.pdf"
 # ---------------------------------------------------------------------------
 PLACEHOLDER_HR_NAME: str = "{HR_NAME}"
 PLACEHOLDER_COMPANY_NAME: str = "{COMPANY_NAME}"
+
+
+# ---------------------------------------------------------------------------
+# Configuration validation
+# ---------------------------------------------------------------------------
+class ConfigError(Exception):
+    """Raised when one or more configuration values are invalid."""
+
+
+def validate_config() -> None:
+    """
+    Validate every configurable value in this module before the
+    application does anything else. Checked: EMAIL_SUBJECT, SMTP_SERVER,
+    SMTP_PORT, PDF_PATH, RESUME_PATH, MIN_DELAY, MAX_DELAY, DAILY_LIMIT,
+    BREAK_AFTER, and START_ROW.
+
+    Raises:
+        ConfigError: With a clear, human-readable message describing
+            every problem found (not just the first one), if any
+            configuration value is invalid.
+    """
+    problems: list[str] = []
+
+    if not EMAIL_SUBJECT or not EMAIL_SUBJECT.strip():
+        problems.append("EMAIL_SUBJECT must not be empty.")
+
+    if not SMTP_SERVER or not SMTP_SERVER.strip():
+        problems.append("SMTP_SERVER must not be empty.")
+
+    if not isinstance(SMTP_PORT, int) or not (0 < SMTP_PORT <= 65535):
+        problems.append(f"SMTP_PORT must be an integer between 1 and 65535 (got {SMTP_PORT!r}).")
+
+    if not isinstance(PDF_PATH, Path) or not str(PDF_PATH).strip():
+        problems.append("PDF_PATH must be a valid, non-empty path.")
+
+    if not isinstance(RESUME_PATH, Path) or not str(RESUME_PATH).strip():
+        problems.append("RESUME_PATH must be a valid, non-empty path.")
+
+    if not isinstance(MIN_DELAY, (int, float)) or MIN_DELAY < 0:
+        problems.append(f"MIN_DELAY must be a non-negative number (got {MIN_DELAY!r}).")
+
+    if not isinstance(MAX_DELAY, (int, float)) or MAX_DELAY < 0:
+        problems.append(f"MAX_DELAY must be a non-negative number (got {MAX_DELAY!r}).")
+
+    if isinstance(MIN_DELAY, (int, float)) and isinstance(MAX_DELAY, (int, float)) and MIN_DELAY > MAX_DELAY:
+        problems.append(f"MIN_DELAY ({MIN_DELAY}) cannot be greater than MAX_DELAY ({MAX_DELAY}).")
+
+    if not isinstance(DAILY_LIMIT, int) or DAILY_LIMIT <= 0:
+        problems.append(f"DAILY_LIMIT must be a positive integer (got {DAILY_LIMIT!r}).")
+
+    if not isinstance(BREAK_AFTER, int) or BREAK_AFTER <= 0:
+        problems.append(f"BREAK_AFTER must be a positive integer (got {BREAK_AFTER!r}).")
+
+    if START_ROW is not None and (not isinstance(START_ROW, int) or START_ROW < 1):
+        problems.append(f"START_ROW must be None or an integer >= 1 (got {START_ROW!r}).")
+
+    if not isinstance(MAX_RETRIES, int) or MAX_RETRIES < 0:
+        problems.append(f"MAX_RETRIES must be a non-negative integer (got {MAX_RETRIES!r}).")
+
+    if not isinstance(RETRY_DELAY_SECONDS, (int, float)) or RETRY_DELAY_SECONDS < 0:
+        problems.append(f"RETRY_DELAY_SECONDS must be a non-negative number (got {RETRY_DELAY_SECONDS!r}).")
+
+    if problems:
+        details = "\n".join(f"  - {p}" for p in problems)
+        raise ConfigError(f"Invalid configuration in config.py:\n{details}")

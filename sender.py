@@ -3,8 +3,8 @@ sender.py
 ---------
 All email-sending logic lives here: the Gmail SMTP (SSL) connection,
 message construction with the resume attached, retry-on-failure
-handling, email validation, and the human-like random delay / break
-functions (including their countdown displays).
+handling, and the human-like random delay / break functions (including
+their countdown displays, which are rendered via utils.countdown).
 """
 
 from __future__ import annotations
@@ -14,22 +14,59 @@ import mimetypes
 import random
 import smtplib
 import ssl
-import sys
 import time
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Optional
 
 import config
-from logger import print_info
-from utils import is_valid_email
+from logger import log_event, print_info
+from utils import countdown
 
 logger = logging.getLogger("email_automation")
+
+# SMTP/network exceptions treated as transient and therefore retried.
+_TRANSIENT_ERRORS = (
+    smtplib.SMTPConnectError,
+    smtplib.SMTPServerDisconnected,
+    smtplib.SMTPException,
+    TimeoutError,
+    ConnectionResetError,
+    OSError,
+)
 
 
 class EmailSenderError(Exception):
     """Raised when the email sender cannot connect, authenticate, or send
     an email after exhausting all configured retries."""
+
+
+def _describe_error(exc: BaseException) -> str:
+    """
+    Translate a raw SMTP/network exception into a short, human-readable
+    reason string suitable for terminal display and CSV logging.
+
+    Args:
+        exc: The caught exception.
+
+    Returns:
+        A concise, user-facing description of what went wrong.
+    """
+    if isinstance(exc, smtplib.SMTPAuthenticationError):
+        return "SMTP Authentication Failed"
+    if isinstance(exc, smtplib.SMTPConnectError):
+        return "Could Not Connect To SMTP Server"
+    if isinstance(exc, smtplib.SMTPServerDisconnected):
+        return "SMTP Connection Dropped"
+    if isinstance(exc, TimeoutError):
+        return "Network Timeout"
+    if isinstance(exc, ConnectionResetError):
+        return "Connection Reset By Server"
+    if isinstance(exc, smtplib.SMTPException):
+        return f"SMTP Error: {exc}"
+    if isinstance(exc, OSError):
+        return f"Network Error: {exc}"
+    return str(exc)
 
 
 class EmailSender:
@@ -82,29 +119,25 @@ class EmailSender:
                     config.SMTP_SERVER, config.SMTP_PORT, context=context, timeout=30
                 )
                 self._connection.login(self.sender_email, self.app_password)
-                logger.info("Authenticated with Gmail SMTP as %s", self.sender_email)
+                log_event(logger, "SMTP Connected", f"as {self.sender_email}")
                 return
             except smtplib.SMTPAuthenticationError as exc:
-                raise EmailSenderError(
-                    "Gmail authentication failed. Verify EMAIL and APP_PASSWORD in "
-                    ".env and that you are using a 16-character Gmail App Password, "
-                    "not your regular account password."
-                ) from exc
-            except (smtplib.SMTPException, OSError) as exc:
+                raise EmailSenderError(_describe_error(exc)) from exc
+            except _TRANSIENT_ERRORS as exc:
                 last_error = exc
-                logger.warning(
-                    "SMTP connection attempt %d/%d failed: %s",
-                    attempt, config.MAX_RETRIES, exc,
-                )
+                reason = _describe_error(exc)
+                logger.warning("SMTP connection attempt %d/%d failed: %s", attempt, config.MAX_RETRIES, reason)
                 if attempt < config.MAX_RETRIES:
                     print_info(
-                        f"Connection attempt {attempt} failed. "
+                        f"Connection attempt {attempt} failed ({reason}). "
                         f"Retrying in {int(config.RETRY_DELAY_SECONDS)} seconds..."
                     )
                     time.sleep(config.RETRY_DELAY_SECONDS)
 
-        raise EmailSenderError(f"Failed to connect to Gmail SMTP server after "
-                                f"{config.MAX_RETRIES} attempts: {last_error}")
+        raise EmailSenderError(
+            f"Failed to connect to Gmail SMTP server after {config.MAX_RETRIES} "
+            f"attempts: {_describe_error(last_error) if last_error else 'unknown error'}"
+        )
 
     def disconnect(self) -> None:
         """Gracefully close the SMTP connection if it is open."""
@@ -115,6 +148,7 @@ class EmailSender:
                 pass
             finally:
                 self._connection = None
+                log_event(logger, "SMTP Disconnected")
 
     def __enter__(self) -> "EmailSender":
         self.connect_smtp()
@@ -123,22 +157,14 @@ class EmailSender:
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.disconnect()
 
+    @property
+    def is_connected(self) -> bool:
+        """Whether the SMTP connection is currently open."""
+        return self._connection is not None
+
     # ------------------------------------------------------------------
     # Message construction
     # ------------------------------------------------------------------
-    @staticmethod
-    def validate_email(email: str) -> bool:
-        """
-        Validate an email address using a practical regex pattern.
-
-        Args:
-            email: The address to validate.
-
-        Returns:
-            True if structurally valid, False otherwise.
-        """
-        return is_valid_email(email)
-
     def create_email(self, hr_name: str, company_name: str, recipient_email: str) -> EmailMessage:
         """
         Build a personalised EmailMessage (subject, From/To, and body
@@ -173,14 +199,20 @@ class EmailSender:
         Args:
             message: The EmailMessage to attach the resume to (mutated
                 in place).
+
+        Raises:
+            PermissionError: If the resume file cannot be read.
         """
         mime_type, _ = mimetypes.guess_type(str(self.resume_path))
         maintype, subtype = ("application", "pdf")
         if mime_type:
             maintype, subtype = mime_type.split("/", 1)
 
-        with open(self.resume_path, "rb") as fh:
-            attachment_data = fh.read()
+        try:
+            with open(self.resume_path, "rb") as fh:
+                attachment_data = fh.read()
+        except PermissionError as exc:
+            raise PermissionError(f"Permission denied while reading resume: {self.resume_path}") from exc
 
         message.add_attachment(
             attachment_data,
@@ -226,16 +258,16 @@ class EmailSender:
                 self._connection = None
                 if attempt < config.MAX_RETRIES:
                     time.sleep(config.RETRY_DELAY_SECONDS)
-            except (smtplib.SMTPException, OSError) as exc:
+            except _TRANSIENT_ERRORS as exc:
                 last_error = exc
                 logger.warning("Transient error sending to %s (attempt %d/%d): %s",
-                                recipient_email, attempt, config.MAX_RETRIES, exc)
+                                recipient_email, attempt, config.MAX_RETRIES, _describe_error(exc))
                 if attempt < config.MAX_RETRIES:
                     time.sleep(config.RETRY_DELAY_SECONDS)
 
         raise EmailSenderError(
-            f"Failed to send email to {recipient_email} after "
-            f"{config.MAX_RETRIES} attempts: {last_error}"
+            f"{_describe_error(last_error) if last_error else 'Unknown error'} "
+            f"(failed after {config.MAX_RETRIES} attempts)"
         )
 
     # ------------------------------------------------------------------
@@ -245,43 +277,26 @@ class EmailSender:
     def random_delay() -> None:
         """
         Sleep for a random duration between config.MIN_DELAY and
-        config.MAX_DELAY seconds, displaying a live countdown.
+        config.MAX_DELAY seconds, displaying a live countdown on a
+        single terminal line.
         """
         duration = random.uniform(config.MIN_DELAY, config.MAX_DELAY)
-        _countdown(int(round(duration)), label="Waiting {seconds} seconds before next email...")
+        countdown(int(round(duration)), label="Waiting {time} seconds before next email...")
 
     @staticmethod
     def take_break() -> None:
         """
         Sleep for a random duration between config.BREAK_MINUTES_MIN and
         config.BREAK_MINUTES_MAX minutes, displaying a banner and a live
-        countdown. Intended to be called after every config.BREAK_AFTER
-        successful sends.
+        MM:SS countdown. Intended to be called after every
+        config.BREAK_AFTER successful sends.
         """
         minutes = random.uniform(config.BREAK_MINUTES_MIN, config.BREAK_MINUTES_MAX)
         total_seconds = int(round(minutes * 60))
 
-        print(f"{'=' * 35}")
+        print("=" * 35)
         print("Taking Human-Like Break")
         print("Duration")
         print(f"{minutes:.1f} Minutes")
-        print(f"{'=' * 35}")
-        _countdown(total_seconds, label="Break time remaining: {seconds} seconds")
-
-
-def _countdown(total_seconds: int, label: str) -> None:
-    """
-    Display a live, single-line countdown in the terminal for the given
-    duration, then move to a fresh line.
-
-    Args:
-        total_seconds: Number of seconds to count down from.
-        label: A format string containing "{seconds}", rendered fresh
-            on every tick.
-    """
-    for remaining in range(total_seconds, 0, -1):
-        sys.stdout.write("\r" + label.format(seconds=remaining) + "   ")
-        sys.stdout.flush()
-        time.sleep(1)
-    sys.stdout.write("\r" + " " * 60 + "\r")
-    sys.stdout.flush()
+        print("=" * 35)
+        countdown(total_seconds, label="Break Remaining {time}")

@@ -1,10 +1,12 @@
 """
 logger.py
 ---------
-Application-wide file logging, the CSV send-log (source of truth for
-duplicate prevention), and colour-coded terminal display helpers.
+Application-wide logging: a file-based diagnostic logger (application.log),
+a CSV send-log wrapper (delegates its actual file I/O to utils.py so the
+read/write logic exists in exactly one place), an exception logger, and
+colour-coded terminal display helpers.
 
-Colour convention (per spec):
+Colour convention:
     Green  -> successful email
     Yellow -> skipped email
     Red    -> failed email
@@ -13,27 +15,23 @@ Colour convention (per spec):
 
 from __future__ import annotations
 
-import csv
 import logging
 import traceback
-from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional, Set
 
 from colorama import Fore, Style, init as colorama_init
 
 import config
-from utils import ensure_directory
+from utils import append_csv_log, create_csv_log, create_folder, read_sent_log
 
 colorama_init(autoreset=True)
-
-CSV_FIELDNAMES = ["Timestamp", "Row", "Company", "HR Name", "Email", "Status", "Error"]
 
 BANNER_WIDTH = 55
 
 
 # ---------------------------------------------------------------------------
-# File logging (application.log) — used for diagnostics and tracebacks only.
+# File logging (application.log) — diagnostics and full tracebacks.
 # The colourful terminal output below is what the user actually watches.
 # ---------------------------------------------------------------------------
 def get_logger(name: str = "email_automation") -> logging.Logger:
@@ -46,7 +44,7 @@ def get_logger(name: str = "email_automation") -> logging.Logger:
     Returns:
         A configured logging.Logger instance writing to logs/application.log.
     """
-    ensure_directory(config.LOG_FOLDER)
+    create_folder(config.LOG_FOLDER)
 
     logger = logging.getLogger(name)
     if logger.handlers:
@@ -63,6 +61,24 @@ def get_logger(name: str = "email_automation") -> logging.Logger:
     return logger
 
 
+def log_event(logger: logging.Logger, event: str, detail: str = "") -> None:
+    """
+    Record a lifecycle event to application.log in a consistent format.
+    Used for every notable milestone: application start/exit, SMTP
+    connect/disconnect, PDF/resume loaded, email sent/failed/skipped,
+    progress saved, daily limit reached, etc.
+
+    Args:
+        logger: The application file logger.
+        event: Short event name, e.g. "SMTP Connected".
+        detail: Optional additional detail to append.
+    """
+    if detail:
+        logger.info("%s | %s", event, detail)
+    else:
+        logger.info("%s", event)
+
+
 def log_exception(logger: logging.Logger, exc: BaseException) -> None:
     """
     Write a full traceback for an unexpected exception to application.log.
@@ -71,19 +87,23 @@ def log_exception(logger: logging.Logger, exc: BaseException) -> None:
         logger: The application file logger.
         exc: The caught exception.
     """
-    logger.error("Unexpected error: %s\n%s", exc, "".join(
-        traceback.format_exception(type(exc), exc, exc.__traceback__)
-    ))
+    logger.error(
+        "Unexpected error: %s\n%s",
+        exc,
+        "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+    )
 
 
 # ---------------------------------------------------------------------------
-# CSV send-log — the authoritative, file-based duplicate-prevention source.
-# Works even if progress.json is deleted, since it is keyed by email/status.
+# CSV send-log — thin wrapper around utils.py's file I/O functions.
+# Kept as a class purely for ergonomic call-sites (one object to pass
+# around); it does not duplicate any read/write logic itself.
 # ---------------------------------------------------------------------------
 class CSVLogger:
     """
-    Append-only CSV logger recording one row per send attempt
-    (SENT, FAILED, or SKIPPED), and providing duplicate lookups.
+    Convenience wrapper around the CSV send-log. All actual reading and
+    writing is delegated to utils.py (create_csv_log / append_csv_log /
+    read_sent_log) so there is exactly one implementation of that logic.
     """
 
     def __init__(self, csv_path: Path = config.CSV_LOG) -> None:
@@ -93,11 +113,7 @@ class CSVLogger:
                 row if it does not already exist. Never overwritten.
         """
         self.csv_path = csv_path
-        ensure_directory(self.csv_path.parent)
-        if not self.csv_path.exists():
-            with open(self.csv_path, mode="w", newline="", encoding="utf-8") as fh:
-                writer = csv.DictWriter(fh, fieldnames=CSV_FIELDNAMES)
-                writer.writeheader()
+        create_csv_log(self.csv_path)
 
     def log(
         self,
@@ -109,8 +125,7 @@ class CSVLogger:
         error: Optional[str] = "",
     ) -> None:
         """
-        Append a single row describing one send attempt. Always appends;
-        never overwrites or truncates existing history.
+        Append a single row describing one send attempt.
 
         Args:
             row: Row number (1-indexed position among cleaned contacts).
@@ -120,39 +135,17 @@ class CSVLogger:
             status: One of "SENT", "FAILED", "SKIPPED".
             error: Optional human-readable error/skip reason.
         """
-        with open(self.csv_path, mode="a", newline="", encoding="utf-8") as fh:
-            writer = csv.DictWriter(fh, fieldnames=CSV_FIELDNAMES)
-            writer.writerow(
-                {
-                    "Timestamp": datetime.now().isoformat(timespec="seconds"),
-                    "Row": row,
-                    "Company": company,
-                    "HR Name": hr_name,
-                    "Email": email,
-                    "Status": status,
-                    "Error": error or "",
-                }
-            )
+        append_csv_log(self.csv_path, row, company, hr_name, email, status, error or "")
 
     def already_sent_emails(self) -> Set[str]:
         """
-        Read the CSV log and return the set of email addresses that
-        already have a "SENT" status recorded. This is the primary,
-        file-based duplicate-prevention mechanism and works even if
-        progress.json has been deleted.
+        Return the set of email addresses already marked "SENT" in the
+        CSV log. Works even if progress.json has been deleted.
 
         Returns:
             A set of lower-cased email addresses already sent to.
         """
-        sent: Set[str] = set()
-        if not self.csv_path.exists():
-            return sent
-        with open(self.csv_path, mode="r", newline="", encoding="utf-8") as fh:
-            reader = csv.DictReader(fh)
-            for row in reader:
-                if row.get("Status") == "SENT" and row.get("Email"):
-                    sent.add(row["Email"].strip().lower())
-        return sent
+        return read_sent_log(self.csv_path)
 
 
 # ---------------------------------------------------------------------------
@@ -167,8 +160,7 @@ def print_banner(title: str) -> None:
 
 def print_kv_block(pairs: Dict[str, str]) -> None:
     """
-    Print a bordered key/value status block, e.g. the per-email status
-    display or the startup summary.
+    Print a bordered key/value status block.
 
     Args:
         pairs: Ordered mapping of label -> value to display.
