@@ -2,9 +2,4 @@ pdfplumber
 pandas
 python-dotenv
 colorama
-<<<<<<< HEAD
-vffbg
-=======
 
-
->>>>>>> 91229f4facd072f0a68ed3c1cc5d6327a2bc9640
