@@ -2,3 +2,6 @@ pdfplumber
 pandas
 python-dotenv
 colorama
+numpy
+matplotlib
+
