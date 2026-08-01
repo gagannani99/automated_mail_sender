@@ -2,3 +2,4 @@ pdfplumber
 pandas
 python-dotenv
 colorama
+vffbg
