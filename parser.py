@@ -9,8 +9,9 @@ DataFrame, and cleans the result (trimming, dedup, validation).
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import pdfplumber
@@ -18,6 +19,16 @@ import pdfplumber
 from utils import clean_text, is_valid_email
 
 logger = logging.getLogger("email_automation")
+
+
+@dataclass
+class ParseStats:
+    """Summary counts produced while cleaning the raw extracted contacts."""
+
+    total_contacts_found: int
+    duplicates_removed: int
+    invalid_removed: int
+    remaining: int
 
 # Canonical output columns, in this exact order.
 COLUMNS = ["SNo", "Name", "Email", "Title", "Company"]
@@ -147,7 +158,7 @@ def _normalise_table(
     return records, mapping
 
 
-def parse_hr_contacts(pdf_path: Path) -> pd.DataFrame:
+def parse_hr_contacts(pdf_path: Path) -> Tuple[pd.DataFrame, ParseStats]:
     """
     Parse the HR contacts PDF into a cleaned pandas DataFrame.
 
@@ -164,8 +175,13 @@ def parse_hr_contacts(pdf_path: Path) -> pd.DataFrame:
         pdf_path: Path to the source HR contacts PDF.
 
     Returns:
-        A pandas DataFrame with columns SNo, Name, Email, Title, Company,
-        sorted according to the original order encountered in the PDF.
+        A tuple of:
+          - A pandas DataFrame with columns SNo, Name, Email, Title,
+            Company, sorted according to the original order encountered
+            in the PDF, with SNo renumbered 1..N to match the "Row"
+            numbering used for resuming and duplicate-skip display.
+          - A ParseStats summary (total found, duplicates removed,
+            invalid removed, remaining) for the startup summary display.
 
     Raises:
         FileNotFoundError: If the PDF does not exist.
@@ -196,6 +212,7 @@ def parse_hr_contacts(pdf_path: Path) -> pd.DataFrame:
         )
 
     df = pd.DataFrame(all_records, columns=COLUMNS)
+    total_contacts_found = len(df)
 
     # Preserve original order via a stable index before any filtering/dedup.
     df.insert(0, "_original_order", range(len(df)))
@@ -204,27 +221,31 @@ def parse_hr_contacts(pdf_path: Path) -> pd.DataFrame:
     for col in COLUMNS:
         df[col] = df[col].apply(clean_text)
 
-    # Drop rows without a usable email at all.
-    before = len(df)
+    # Drop rows without a usable email at all (counted as "invalid").
+    empty_email_count = int((df["Email"] == "").sum())
     df = df[df["Email"] != ""].copy()
-    logger.info("Dropped %d rows with empty email field.", before - len(df))
 
-    # Validate email format.
-    before = len(df)
+    # Validate email format (also counted as "invalid").
     df["_valid_email"] = df["Email"].apply(is_valid_email)
-    invalid_df = df[~df["_valid_email"]]
-    if not invalid_df.empty:
-        logger.warning("Found %d rows with malformed email addresses; they will be skipped.", len(invalid_df))
+    malformed_email_count = int((~df["_valid_email"]).sum())
+    if malformed_email_count:
+        logger.warning(
+            "Found %d rows with malformed email addresses; they will be skipped.",
+            malformed_email_count,
+        )
     df = df[df["_valid_email"]].copy()
     df.drop(columns=["_valid_email"], inplace=True)
-    logger.info("Dropped %d rows with invalid email format.", before - len(df))
+
+    invalid_removed = empty_email_count + malformed_email_count
+    logger.info("Invalid emails removed: %d", invalid_removed)
 
     # Deduplicate by lower-cased email, keeping first occurrence (original order).
     before = len(df)
     df["_email_key"] = df["Email"].str.lower()
     df = df.drop_duplicates(subset="_email_key", keep="first").copy()
     df.drop(columns=["_email_key"], inplace=True)
-    logger.info("Dropped %d duplicate-email rows.", before - len(df))
+    duplicates_removed = before - len(df)
+    logger.info("Duplicate emails removed: %d", duplicates_removed)
 
     # Restore original encounter order, then renumber SNo sequentially
     # only if the source SNo column is missing/unreliable; otherwise keep
@@ -233,8 +254,17 @@ def parse_hr_contacts(pdf_path: Path) -> pd.DataFrame:
     df.drop(columns=["_original_order"], inplace=True)
     df.reset_index(drop=True, inplace=True)
 
-    if df["SNo"].eq("").all():
-        df["SNo"] = range(1, len(df) + 1)
+    # Renumber SNo sequentially (1..N) to match the "Row" numbering used
+    # throughout the app for resuming (START_ROW) and progress tracking,
+    # regardless of whatever serial numbers appeared in the source PDF.
+    df["SNo"] = range(1, len(df) + 1)
+
+    stats = ParseStats(
+        total_contacts_found=total_contacts_found,
+        duplicates_removed=duplicates_removed,
+        invalid_removed=invalid_removed,
+        remaining=len(df),
+    )
 
     logger.info("Successfully parsed %d valid, unique HR contacts.", len(df))
-    return df[COLUMNS]
+    return df[COLUMNS], stats

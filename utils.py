@@ -2,14 +2,12 @@
 utils.py
 --------
 Small, dependency-light helper functions shared across the application:
-email validation, human-like delay generation, and filesystem helpers.
+email validation, text cleaning, duration formatting, and filesystem helpers.
 """
 
 from __future__ import annotations
 
-import random
 import re
-import time
 from pathlib import Path
 from typing import Optional
 
@@ -39,39 +37,6 @@ def is_valid_email(email: Optional[str]) -> bool:
     if len(email) > 254:
         return False
     return bool(_EMAIL_REGEX.match(email))
-
-
-def random_delay(min_seconds: float, max_seconds: float) -> float:
-    """
-    Sleep for a random duration between min_seconds and max_seconds.
-
-    Args:
-        min_seconds: Lower bound (inclusive) in seconds.
-        max_seconds: Upper bound (inclusive) in seconds.
-
-    Returns:
-        The actual number of seconds slept.
-    """
-    duration = random.uniform(min_seconds, max_seconds)
-    time.sleep(duration)
-    return duration
-
-
-def random_break_minutes(min_minutes: float, max_minutes: float) -> float:
-    """
-    Sleep for a random duration between min_minutes and max_minutes
-    (expressed in minutes), used for longer periodic breaks.
-
-    Args:
-        min_minutes: Lower bound (inclusive) in minutes.
-        max_minutes: Upper bound (inclusive) in minutes.
-
-    Returns:
-        The actual number of minutes slept.
-    """
-    minutes = random.uniform(min_minutes, max_minutes)
-    time.sleep(minutes * 60)
-    return minutes
 
 
 def ensure_directory(path: Path) -> None:
@@ -110,3 +75,20 @@ def file_exists(path: Path) -> bool:
         True if the file exists, False otherwise.
     """
     return path.is_file()
+
+
+def format_duration(total_seconds: float) -> str:
+    """
+    Format a duration in seconds as HH:MM:SS.
+
+    Args:
+        total_seconds: Duration in seconds (may be fractional; truncated
+            to whole seconds).
+
+    Returns:
+        A zero-padded "HH:MM:SS" string. Hours can exceed 99 if needed.
+    """
+    total_seconds = max(0, int(total_seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"

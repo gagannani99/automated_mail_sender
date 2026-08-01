@@ -1,17 +1,24 @@
 """
 logger.py
 ---------
-Application-wide logging setup and a CSV logger dedicated to recording
-every send attempt (success, failure, or skip) for auditing purposes.
+Application-wide file logging, the CSV send-log (source of truth for
+duplicate prevention), and colour-coded terminal display helpers.
+
+Colour convention (per spec):
+    Green  -> successful email
+    Yellow -> skipped email
+    Red    -> failed email
+    Blue   -> general information
 """
 
 from __future__ import annotations
 
 import csv
 import logging
+import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional, Set
 
 from colorama import Fore, Style, init as colorama_init
 
@@ -20,88 +27,70 @@ from utils import ensure_directory
 
 colorama_init(autoreset=True)
 
-CSV_FIELDNAMES = [
-    "timestamp",
-    "sno",
-    "hr_name",
-    "company_name",
-    "email",
-    "status",
-    "reason",
-]
+CSV_FIELDNAMES = ["Timestamp", "Row", "Company", "HR Name", "Email", "Status", "Error"]
+
+BANNER_WIDTH = 55
 
 
+# ---------------------------------------------------------------------------
+# File logging (application.log) — used for diagnostics and tracebacks only.
+# The colourful terminal output below is what the user actually watches.
+# ---------------------------------------------------------------------------
 def get_logger(name: str = "email_automation") -> logging.Logger:
     """
-    Configure and return the application logger.
-
-    Logs to both the console (with colour) and a rotating-free plain
-    text file under the logs/ directory.
+    Configure and return the application's file logger.
 
     Args:
         name: Logger name.
 
     Returns:
-        A configured logging.Logger instance.
+        A configured logging.Logger instance writing to logs/application.log.
     """
     ensure_directory(config.LOG_FOLDER)
 
     logger = logging.getLogger(name)
     if logger.handlers:
-        # Logger already configured (e.g. re-imported); avoid duplicate handlers.
         return logger
 
     logger.setLevel(logging.INFO)
-
     file_handler = logging.FileHandler(config.APP_LOG, encoding="utf-8")
     file_formatter = logging.Formatter(
         fmt="%(asctime)s | %(levelname)-8s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     file_handler.setFormatter(file_formatter)
-
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(_ColorFormatter())
-
     logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
     return logger
 
 
-class _ColorFormatter(logging.Formatter):
-    """Console formatter that colours log lines based on severity."""
+def log_exception(logger: logging.Logger, exc: BaseException) -> None:
+    """
+    Write a full traceback for an unexpected exception to application.log.
 
-    _COLORS = {
-        logging.DEBUG: Fore.CYAN,
-        logging.INFO: Fore.GREEN,
-        logging.WARNING: Fore.YELLOW,
-        logging.ERROR: Fore.RED,
-        logging.CRITICAL: Fore.MAGENTA + Style.BRIGHT,
-    }
-
-    def format(self, record: logging.LogRecord) -> str:
-        color = self._COLORS.get(record.levelno, "")
-        message = super().format(record)
-        return f"{color}{message}{Style.RESET_ALL}"
-
-    def __init__(self) -> None:
-        super().__init__(
-            fmt="%(asctime)s | %(levelname)-8s | %(message)s",
-            datefmt="%H:%M:%S",
-        )
+    Args:
+        logger: The application file logger.
+        exc: The caught exception.
+    """
+    logger.error("Unexpected error: %s\n%s", exc, "".join(
+        traceback.format_exception(type(exc), exc, exc.__traceback__)
+    ))
 
 
+# ---------------------------------------------------------------------------
+# CSV send-log — the authoritative, file-based duplicate-prevention source.
+# Works even if progress.json is deleted, since it is keyed by email/status.
+# ---------------------------------------------------------------------------
 class CSVLogger:
     """
-    Append-only CSV logger that records one row per send attempt
-    (SENT, FAILED, or SKIPPED) for auditing and resumability.
+    Append-only CSV logger recording one row per send attempt
+    (SENT, FAILED, or SKIPPED), and providing duplicate lookups.
     """
 
     def __init__(self, csv_path: Path = config.CSV_LOG) -> None:
         """
         Args:
             csv_path: Path to the CSV log file. Created with a header
-                row if it does not already exist.
+                row if it does not already exist. Never overwritten.
         """
         self.csv_path = csv_path
         ensure_directory(self.csv_path.parent)
@@ -112,53 +101,104 @@ class CSVLogger:
 
     def log(
         self,
-        sno: int,
+        row: int,
+        company: str,
         hr_name: str,
-        company_name: str,
         email: str,
         status: str,
-        reason: Optional[str] = "",
+        error: Optional[str] = "",
     ) -> None:
         """
-        Append a single row describing one send attempt.
+        Append a single row describing one send attempt. Always appends;
+        never overwrites or truncates existing history.
 
         Args:
-            sno: Serial number of the contact in the source PDF.
+            row: Row number (1-indexed position among cleaned contacts).
+            company: Company name.
             hr_name: HR contact's name.
-            company_name: Company name.
             email: Recipient email address.
             status: One of "SENT", "FAILED", "SKIPPED".
-            reason: Optional human-readable reason (used for FAILED/SKIPPED).
+            error: Optional human-readable error/skip reason.
         """
         with open(self.csv_path, mode="a", newline="", encoding="utf-8") as fh:
             writer = csv.DictWriter(fh, fieldnames=CSV_FIELDNAMES)
             writer.writerow(
                 {
-                    "timestamp": datetime.now().isoformat(timespec="seconds"),
-                    "sno": sno,
-                    "hr_name": hr_name,
-                    "company_name": company_name,
-                    "email": email,
-                    "status": status,
-                    "reason": reason or "",
+                    "Timestamp": datetime.now().isoformat(timespec="seconds"),
+                    "Row": row,
+                    "Company": company,
+                    "HR Name": hr_name,
+                    "Email": email,
+                    "Status": status,
+                    "Error": error or "",
                 }
             )
 
-    def already_sent_emails(self) -> set[str]:
+    def already_sent_emails(self) -> Set[str]:
         """
         Read the CSV log and return the set of email addresses that
-        already have a "SENT" status recorded. Used as a secondary,
-        file-based safety net in addition to progress.json.
+        already have a "SENT" status recorded. This is the primary,
+        file-based duplicate-prevention mechanism and works even if
+        progress.json has been deleted.
 
         Returns:
-            A set of lower-cased email addresses that were already sent.
+            A set of lower-cased email addresses already sent to.
         """
-        sent: set[str] = set()
+        sent: Set[str] = set()
         if not self.csv_path.exists():
             return sent
         with open(self.csv_path, mode="r", newline="", encoding="utf-8") as fh:
             reader = csv.DictReader(fh)
             for row in reader:
-                if row.get("status") == "SENT" and row.get("email"):
-                    sent.add(row["email"].strip().lower())
+                if row.get("Status") == "SENT" and row.get("Email"):
+                    sent.add(row["Email"].strip().lower())
         return sent
+
+
+# ---------------------------------------------------------------------------
+# Colour-coded terminal display helpers
+# ---------------------------------------------------------------------------
+def print_banner(title: str) -> None:
+    """Print a titled banner line in blue."""
+    print(f"{Fore.BLUE}{'=' * BANNER_WIDTH}{Style.RESET_ALL}")
+    print(f"{Fore.BLUE}{title}{Style.RESET_ALL}")
+    print(f"{Fore.BLUE}{'=' * BANNER_WIDTH}{Style.RESET_ALL}")
+
+
+def print_kv_block(pairs: Dict[str, str]) -> None:
+    """
+    Print a bordered key/value status block, e.g. the per-email status
+    display or the startup summary.
+
+    Args:
+        pairs: Ordered mapping of label -> value to display.
+    """
+    print(f"{Fore.BLUE}{'=' * BANNER_WIDTH}{Style.RESET_ALL}")
+    for label, value in pairs.items():
+        print(f"{label}")
+        print(f"{value}")
+    print(f"{Fore.BLUE}{'=' * BANNER_WIDTH}{Style.RESET_ALL}")
+
+
+def print_info(message: str) -> None:
+    """Print an informational message in blue."""
+    print(f"{Fore.BLUE}{message}{Style.RESET_ALL}")
+
+
+def print_success(message: str) -> None:
+    """Print a success message in green."""
+    print(f"{Fore.GREEN}{message}{Style.RESET_ALL}")
+
+
+def print_failure(message: str, reason: str = "") -> None:
+    """Print a failure message in red, with an optional reason line."""
+    print(f"{Fore.RED}{message}{Style.RESET_ALL}")
+    if reason:
+        print(f"{Fore.RED}Reason: {reason}{Style.RESET_ALL}")
+
+
+def print_skip(message: str, reason: str = "") -> None:
+    """Print a skip message in yellow, with an optional reason line."""
+    print(f"{Fore.YELLOW}{message}{Style.RESET_ALL}")
+    if reason:
+        print(f"{Fore.YELLOW}Reason: {reason}{Style.RESET_ALL}")

@@ -38,30 +38,36 @@ Thank you for your valuable time.
 
 Best Regards,
 Gagan Sai Alasapuri
-+91 6302896438
+(+91) 6302896438
 gagansaialasapuri99@gmail.com
 linkedin.com/in/gagan-sai-alasapuri
-https://github.com/gagannani99
+gagansaiportfolio.netlify.app
 """
 
 # ---------------------------------------------------------------------------
 # Sending limits and pacing
 # ---------------------------------------------------------------------------
 # Gmail personal accounts are capped at ~500 recipients/day by Google, and
-# sending too fast or in a single burst is the fastest way to get an
-# account flagged or suspended. DAILY_LIMIT is intentionally conservative.
-DAILY_LIMIT: int = 80
+# sending too fast or in a single burst is one of the fastest ways to get
+# an account flagged or rate-limited. These defaults are intentionally
+# conservative. NOTE: this application cannot and does not guarantee that
+# your account will be safe from Gmail's own rate limiting or spam
+# detection — it only implements best-effort, human-like pacing.
+DAILY_LIMIT: int = 120
 
-# 1-indexed row (by SNo) to start from the very first time the app is run
-# and progress.json has no prior history for the recipient list.
-START_ROW: int = 1
+# Manual resume-row override.
+#   - If START_ROW is None: the app auto-resumes from progress.json
+#     (last_successful_row + 1), or from row 1 if no progress exists yet.
+#   - If START_ROW is an integer: progress.json's row is ignored and
+#     sending starts from that row number instead (1-indexed).
+START_ROW: "int | None" = None
 
 # Random delay (in seconds) inserted between two consecutive emails.
-MIN_DELAY: float = 25.0
-MAX_DELAY: float = 55.0
+MIN_DELAY: float = 30.0
+MAX_DELAY: float = 90.0
 
-# Take a longer break after this many emails have been sent in the
-# current run, to further mimic human sending behaviour.
+# Take a longer break after this many *successful* emails have been sent
+# in the current run, to further mimic human sending behaviour.
 BREAK_AFTER: int = 20
 BREAK_MINUTES_MIN: float = 5.0
 BREAK_MINUTES_MAX: float = 10.0
@@ -71,6 +77,11 @@ BREAK_MINUTES_MAX: float = 10.0
 # ---------------------------------------------------------------------------
 SMTP_SERVER: str = "smtp.gmail.com"
 SMTP_PORT: int = 465  # SSL port
+
+# Retry behaviour for transient SMTP/network errors while sending a
+# single email (connection drops, timeouts, etc.).
+MAX_RETRIES: int = 3
+RETRY_DELAY_SECONDS: float = 15.0
 
 # ---------------------------------------------------------------------------
 # File locations
