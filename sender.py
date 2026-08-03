@@ -20,18 +20,23 @@ from pathlib import Path
 from typing import Optional
 
 import config
-from logger import log_event, print_info
+from logger import LOGGER_NAME, log_event, print_info
 from utils import countdown
 
-logger = logging.getLogger("email_automation")
+logger = logging.getLogger(LOGGER_NAME)
 
 # SMTP/network exceptions treated as transient and therefore retried.
+# ConnectionResetError, ConnectionAbortedError, and TimeoutError are all
+# OSError subclasses and would be caught by the trailing OSError anyway;
+# they are listed explicitly so _describe_error() can give each one a
+# distinct, human-readable message.
 _TRANSIENT_ERRORS = (
     smtplib.SMTPConnectError,
     smtplib.SMTPServerDisconnected,
     smtplib.SMTPException,
     TimeoutError,
     ConnectionResetError,
+    ConnectionAbortedError,
     OSError,
 )
 
@@ -62,6 +67,8 @@ def _describe_error(exc: BaseException) -> str:
         return "Network Timeout"
     if isinstance(exc, ConnectionResetError):
         return "Connection Reset By Server"
+    if isinstance(exc, ConnectionAbortedError):
+        return "Connection Aborted"
     if isinstance(exc, smtplib.SMTPException):
         return f"SMTP Error: {exc}"
     if isinstance(exc, OSError):
@@ -126,7 +133,9 @@ class EmailSender:
             except _TRANSIENT_ERRORS as exc:
                 last_error = exc
                 reason = _describe_error(exc)
-                logger.warning("SMTP connection attempt %d/%d failed: %s", attempt, config.MAX_RETRIES, reason)
+                logger.warning(
+                    "SMTP connection attempt %d/%d failed: %s", attempt, config.MAX_RETRIES, reason
+                )
                 if attempt < config.MAX_RETRIES:
                     print_info(
                         f"Connection attempt {attempt} failed ({reason}). "
@@ -189,7 +198,7 @@ class EmailSender:
         message["Subject"] = config.EMAIL_SUBJECT
         message["From"] = self.sender_email
         message["To"] = recipient_email
-        message.set_content(body)
+        message.set_content(body, charset="utf-8")
         return message
 
     def attach_resume(self, message: EmailMessage) -> None:
@@ -253,15 +262,19 @@ class EmailSender:
                 return
             except smtplib.SMTPServerDisconnected as exc:
                 last_error = exc
-                logger.warning("SMTP connection dropped; reconnecting (attempt %d/%d)...",
-                                attempt, config.MAX_RETRIES)
+                logger.warning(
+                    "SMTP connection dropped; reconnecting (attempt %d/%d)...",
+                    attempt, config.MAX_RETRIES,
+                )
                 self._connection = None
                 if attempt < config.MAX_RETRIES:
                     time.sleep(config.RETRY_DELAY_SECONDS)
             except _TRANSIENT_ERRORS as exc:
                 last_error = exc
-                logger.warning("Transient error sending to %s (attempt %d/%d): %s",
-                                recipient_email, attempt, config.MAX_RETRIES, _describe_error(exc))
+                logger.warning(
+                    "Transient error sending to %s (attempt %d/%d): %s",
+                    recipient_email, attempt, config.MAX_RETRIES, _describe_error(exc),
+                )
                 if attempt < config.MAX_RETRIES:
                     time.sleep(config.RETRY_DELAY_SECONDS)
 

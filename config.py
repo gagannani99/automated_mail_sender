@@ -133,9 +133,13 @@ def validate_config() -> None:
 
     if not isinstance(PDF_PATH, Path) or not str(PDF_PATH).strip():
         problems.append("PDF_PATH must be a valid, non-empty path.")
+    elif BASE_DIR not in PDF_PATH.resolve().parents and PDF_PATH.resolve() != BASE_DIR:
+        problems.append(f"PDF_PATH must resolve to a location inside the project folder (got {PDF_PATH!r}).")
 
     if not isinstance(RESUME_PATH, Path) or not str(RESUME_PATH).strip():
         problems.append("RESUME_PATH must be a valid, non-empty path.")
+    elif BASE_DIR not in RESUME_PATH.resolve().parents and RESUME_PATH.resolve() != BASE_DIR:
+        problems.append(f"RESUME_PATH must resolve to a location inside the project folder (got {RESUME_PATH!r}).")
 
     if not isinstance(MIN_DELAY, (int, float)) or MIN_DELAY < 0:
         problems.append(f"MIN_DELAY must be a non-negative number (got {MIN_DELAY!r}).")

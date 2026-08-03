@@ -16,6 +16,7 @@ Colour convention:
 from __future__ import annotations
 
 import logging
+import time
 import traceback
 from pathlib import Path
 from typing import Dict, Optional, Set
@@ -27,14 +28,22 @@ from utils import append_csv_log, create_csv_log, create_folder, read_sent_log
 
 colorama_init(autoreset=True)
 
+LOGGER_NAME = "email_automation"
+
+# Shared terminal display widths — defined once here so every bordered
+# box in the app (banners, dashboard, preview, summaries) stays visually
+# consistent instead of scattering literal "=" * N magic numbers.
 BANNER_WIDTH = 55
+DASHBOARD_WIDTH = 42
+STATUS_BLOCK_WIDTH = 37
+PREVIEW_WIDTH = 36
 
 
 # ---------------------------------------------------------------------------
 # File logging (application.log) — diagnostics and full tracebacks.
 # The colourful terminal output below is what the user actually watches.
 # ---------------------------------------------------------------------------
-def get_logger(name: str = "email_automation") -> logging.Logger:
+def get_logger(name: str = LOGGER_NAME) -> logging.Logger:
     """
     Configure and return the application's file logger.
 
@@ -125,7 +134,13 @@ class CSVLogger:
         error: Optional[str] = "",
     ) -> None:
         """
-        Append a single row describing one send attempt.
+        Append a single row describing one send attempt. If the CSV file
+        is temporarily locked or inaccessible (e.g. open in Excel on
+        Windows), the write is retried a few times with a short pause;
+        if it still fails, the error is logged to application.log and
+        swallowed rather than crashing an otherwise-successful send —
+        losing one audit-log line is far less costly than aborting a
+        1000+ contact campaign over a transient file lock.
 
         Args:
             row: Row number (1-indexed position among cleaned contacts).
@@ -135,7 +150,22 @@ class CSVLogger:
             status: One of "SENT", "FAILED", "SKIPPED".
             error: Optional human-readable error/skip reason.
         """
-        append_csv_log(self.csv_path, row, company, hr_name, email, status, error or "")
+        csv_write_retries = 3
+        csv_write_retry_delay_seconds = 2.0
+
+        for attempt in range(1, csv_write_retries + 1):
+            try:
+                append_csv_log(self.csv_path, row, company, hr_name, email, status, error or "")
+                return
+            except PermissionError as exc:
+                if attempt < csv_write_retries:
+                    time.sleep(csv_write_retry_delay_seconds)
+                    continue
+                logging.getLogger(LOGGER_NAME).warning(
+                    "Could not write to CSV log (row %d, %s) after %d attempts — "
+                    "the file may be open in another program: %s",
+                    row, email, csv_write_retries, exc,
+                )
 
     def already_sent_emails(self) -> Set[str]:
         """

@@ -68,7 +68,8 @@ cd email_automation
 pip install -r requirements.txt
 ```
 
-Requires Python 3.10+ (uses modern type-hint syntax).
+Requires **Python 3.10+** (the codebase uses modern type-hint syntax such
+as `int | None`, which requires 3.10 or later).
 
 Then place your input files:
 
@@ -150,6 +151,27 @@ On every run, the app:
 6. Sends emails one at a time, with a live dashboard refreshed before
    every send, randomized delays, and periodic longer breaks.
 7. Stops automatically at the daily limit, saving progress immediately.
+
+## 6a. Stopping The Project
+
+Press **Ctrl+C** at any point — during a countdown, mid-send, or
+anywhere else. The app catches the interrupt, immediately saves
+progress, disconnects cleanly from Gmail, and prints exactly which row
+was last completed and which row to resume from next:
+
+```
+=====================================
+Program Interrupted
+Progress Saved
+Last Successful Row
+157
+Next Start Row
+158
+=====================================
+```
+
+No email is ever left half-sent — progress is only marked successful
+*after* Gmail confirms the send.
 
 ## 7. How Progress Resume Works
 
@@ -234,8 +256,10 @@ exactly where it left off — no manual bookkeeping required.
 | `HR contacts PDF is empty (0 bytes)` | The PDF file has no content | Re-export/re-download the PDF |
 | `No tables could be extracted from the PDF` | The PDF is a scanned image or plain-text layout, not a real table | Re-export as a proper table, or OCR it first |
 | `No valid contact rows could be extracted from the PDF` | Table exists but no recognisable Name/Email/Company columns | Check the PDF's column headers |
-| `Network Timeout` / `Connection Reset By Server` / `SMTP Connection Dropped` | Transient network issue | The app automatically retries (up to `MAX_RETRIES`); if it still fails, check your internet connection |
+| `Network Timeout` / `Connection Reset By Server` / `Connection Aborted` / `SMTP Connection Dropped` | Transient network issue | The app automatically retries (up to `MAX_RETRIES`); if it still fails, check your internet connection |
 | `A required file could not be accessed.` (PermissionError) | OS-level file permission issue | Check that the app has write access to `logs/`, `progress.json`, and read access to the PDF/resume |
+| `Could not write to CSV log ... the file may be open in another program` (warning, not fatal) | `logs/sent_emails.csv` is open in Excel or another program | Close the file — the app retries automatically and simply logs a warning if it still can't write; **it keeps sending, it does not stop** |
+| `Could not save progress.json ... the file may be open in another program` (warning, not fatal) | `progress.json` is open/locked elsewhere | Close the file — the app retries automatically and continues the run; `sent_emails.csv` still prevents any duplicate sends in the meantime |
 
 ## 12. FAQ
 
