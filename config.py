@@ -38,10 +38,10 @@ Thank you for your valuable time.
 
 Best Regards,
 Gagan Sai Alasapuri
-(+91) 6302896438
++91 6302896438
 gagansaialasapuri99@gmail.com
 linkedin.com/in/gagan-sai-alasapuri
-gagansaiportfolio.netlify.app
+https://github.com/gagannani99
 """
 
 # ---------------------------------------------------------------------------
