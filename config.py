@@ -40,8 +40,6 @@ Best Regards,
 Gagan Sai Alasapuri
 +91 6302896438
 gagansaialasapuri99@gmail.com
-linkedin.com/in/gagan-sai-alasapuri
-https://github.com/gagannani99
 """
 
 # ---------------------------------------------------------------------------
@@ -53,7 +51,7 @@ https://github.com/gagannani99
 # conservative. NOTE: this application cannot and does not guarantee that
 # your account will be safe from Gmail's own rate limiting or spam
 # detection — it only implements best-effort, human-like pacing.
-DAILY_LIMIT: int = 120
+DAILY_LIMIT: int = 2
 
 # Manual resume-row override.
 #   - If START_ROW is None: the app auto-resumes from progress.json
@@ -63,8 +61,8 @@ DAILY_LIMIT: int = 120
 START_ROW: "int | None" = None
 
 # Random delay (in seconds) inserted between two consecutive emails.
-MIN_DELAY: float = 30.0
-MAX_DELAY: float = 90.0
+MIN_DELAY: float = 25.0
+MAX_DELAY: float = 70.0
 
 # Take a longer break after this many *successful* emails have been sent
 # in the current run, to further mimic human sending behaviour.
