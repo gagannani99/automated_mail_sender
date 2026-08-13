@@ -51,7 +51,7 @@ gagansaialasapuri99@gmail.com
 # conservative. NOTE: this application cannot and does not guarantee that
 # your account will be safe from Gmail's own rate limiting or spam
 # detection — it only implements best-effort, human-like pacing.
-DAILY_LIMIT: int = 2
+DAILY_LIMIT: int = 120
 
 # Manual resume-row override.
 #   - If START_ROW is None: the app auto-resumes from progress.json

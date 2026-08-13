@@ -1,2 +1,15 @@
 # Environment variables
 .env
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Logs
+logs/
+*.log
+
+attachments/Resume.pdf
+
+progress.json
